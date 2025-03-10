@@ -13,6 +13,13 @@ model.to(device)
 
 print("Code:\n", data[0]["code"])
 code_sample = data[0]["code"]
-tokens = tokenizer(code_sample, padding=True, truncation=True, max_length=512)
+tokens = tokenizer(code_sample, padding=True, truncation=True, max_length=512, return_tensors="pt")
+tokens = {key: value.to(device) for key, value in tokens.items()}
 
-print("Tokenized Input IDs:\n", tokens["input_ids"]) 
+with torch.no_grad():
+    outputs = model(**tokens)
+
+print("Model shape", outputs.last_hidden_state.shape)
+
+cls_embedding = outputs.last_hidden_state[:, 0, :] 
+print("Function Embedding Shape:", cls_embedding.shape)
