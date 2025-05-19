@@ -7,7 +7,7 @@ def get_entries(amount: int):
     pos_samples = [item for item in data if item["vul"] == 1]
     neg_samples = [item for item in data if item["vul"] == 0]
 
-    print(f"Normal samples: {len(pos_samples)}, Vulnerable samples: {len(neg_samples)}")
+    print(f"Vulnerable samples: {len(pos_samples)}, Normal samples: {len(neg_samples)}")
 
     train_samples = pos_samples[:amount] + neg_samples[:amount]
     used_indices = set()
