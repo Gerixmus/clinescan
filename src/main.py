@@ -2,22 +2,28 @@ import torch
 import torch.nn as nn
 import random
 from transformers import RobertaTokenizer, RobertaModel
-import data
+from data import get_entries
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 
-#TODO move to data
-num_vul = 8794
-num_invul = 177736
-total = num_vul + num_invul
+all_data = get_entries()
 
-weight_for_0 = total / (2 * num_invul)
-weight_for_1 = total / (2 * num_vul)
+vulnerable_data = [i for i in all_data if i.vul == 1]
+invulnerable_data = [i for i in all_data if i.vul == 0]
+total = len(vulnerable_data) + len(invulnerable_data)
+
+sample_size = 100
+train_samples = vulnerable_data[:sample_size] + invulnerable_data[:sample_size]
+random.shuffle(train_samples)
+
+used_ids = set(id(f) for f in train_samples)
+eval_samples = [f for f in all_data if id(f) not in used_ids]
+eval_samples = random.sample(eval_samples, min(len(train_samples), len(eval_samples)))
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+weight_for_0 = total / (2 * len(invulnerable_data))
+weight_for_1 = total / (2 * len(vulnerable_data))
 class_weights = torch.tensor([weight_for_0, weight_for_1]).to(device)
-
-all_data, train_samples, used_indices, remaining_indices = data.get_entries(1000)
 
 tokenizer = RobertaTokenizer.from_pretrained("microsoft/codebert-base")
 model = RobertaModel.from_pretrained("microsoft/codebert-base")
@@ -37,8 +43,8 @@ optimizer = torch.optim.Adam(
 )
 
 for i, item in enumerate(train_samples):
-    code = item["code"]
-    label = torch.tensor([item["vul"]]).to(device)
+    code = "\n".join(item.code)
+    label = torch.tensor([item.vul]).to(device)
 
     tokens = tokenizer(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
     tokens = {k: v.to(device) for k, v in tokens.items()}
@@ -53,9 +59,8 @@ for i, item in enumerate(train_samples):
     optimizer.step()
     optimizer.zero_grad()
 
-    print(f"Sample {i} | Label: {item['vul']} | Loss: {loss.item():.4f}")
+    print(f"Sample {i} | Label: {item.vul} | Loss: {loss.item():.4f}")
 
-eval_indices = random.sample(remaining_indices, min(len(train_samples), len(remaining_indices)))
 true_labels = []
 predicted_labels = []
 correct = 0
@@ -63,9 +68,9 @@ correct = 0
 model.eval()
 classifier.eval()
 
-for i in eval_indices:
-    code = all_data[i]["code"]
-    true_label = all_data[i]["vul"]
+for i, item in enumerate(eval_samples):
+    code = "\n".join(item.code)
+    true_label = item.vul
 
     tokens = tokenizer(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
     tokens = {k: v.to(device) for k, v in tokens.items()}
