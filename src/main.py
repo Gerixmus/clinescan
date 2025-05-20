@@ -11,6 +11,7 @@ vulnerable_data = [i for i in all_data if i.vul == 1]
 invulnerable_data = [i for i in all_data if i.vul == 0]
 total = len(vulnerable_data) + len(invulnerable_data)
 
+num_epochs = 5
 sample_size = 100
 train_samples = vulnerable_data[:sample_size] + invulnerable_data[:sample_size]
 random.shuffle(train_samples)
@@ -41,25 +42,25 @@ loss_fn = nn.CrossEntropyLoss(weight=class_weights)
 optimizer = torch.optim.Adam(
     list(model.parameters()) + list(classifier.parameters()), lr=2e-5
 )
+for epoch in range(num_epochs):
+    for i, item in enumerate(train_samples):
+        code = "\n".join(item.code)
+        label = torch.tensor([item.vul]).to(device)
 
-for i, item in enumerate(train_samples):
-    code = "\n".join(item.code)
-    label = torch.tensor([item.vul]).to(device)
+        tokens = tokenizer(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
+        tokens = {k: v.to(device) for k, v in tokens.items()}
 
-    tokens = tokenizer(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
-    tokens = {k: v.to(device) for k, v in tokens.items()}
+        outputs = model(**tokens)
+        cls_embedding = outputs.last_hidden_state[:, 0, :]
 
-    outputs = model(**tokens)
-    cls_embedding = outputs.last_hidden_state[:, 0, :]
+        logits = classifier(cls_embedding)
+        loss = loss_fn(logits, label)
 
-    logits = classifier(cls_embedding)
-    loss = loss_fn(logits, label)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
 
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
-
-    print(f"Sample {i} | Label: {item.vul} | Loss: {loss.item():.4f}")
+        print(f"Sample {i} | Label: {item.vul} | Loss: {loss.item():.4f}")
 
 true_labels = []
 predicted_labels = []
@@ -67,6 +68,7 @@ correct = 0
 
 model.eval()
 classifier.eval()
+
 
 for i, item in enumerate(eval_samples):
     code = "\n".join(item.code)
