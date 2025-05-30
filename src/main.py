@@ -5,6 +5,7 @@ from transformers import RobertaTokenizer, RobertaModel
 from data import get_entries
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 import wandb
+import torch.nn.functional as F
 
 all_data = get_entries()
 
@@ -83,14 +84,17 @@ for epoch in range(epochs):
 
 true_labels = []
 predicted_labels = []
+all_logits = []
 correct = 0
 
 model.eval()
 classifier.eval()
 
+results = []
 for i, item in enumerate(eval_samples):
     code = "\n".join(item.code)
     true_label = item.vul
+    loc = len(item.code)
 
     tokens = tokenizer(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
     tokens = {k: v.to(device) for k, v in tokens.items()}
@@ -100,15 +104,27 @@ for i, item in enumerate(eval_samples):
         cls_embedding = outputs.last_hidden_state[:, 0, :]
         logits = classifier(cls_embedding)
 
-    predicted = logits.argmax(dim=1).item()
-    predicted_labels.append(predicted)
-    true_labels.append(true_label)
+    prob = F.softmax(logits, dim=1)[0, 1].item()
+    pred = logits.argmax(dim=1).item()
 
-    match = "✅" if predicted == true_label else "❌"
-    if predicted == true_label:
+    true_labels.append(true_label)
+    predicted_labels.append(pred)
+    all_logits.append(logits)
+
+    results.append({
+        "prob": prob,
+        "label": true_label,
+        "loc": loc
+    })
+    # predicted = logits.argmax(dim=1).item()
+    # predicted_labels.append(predicted)
+    # true_labels.append(true_label)
+
+    match = "✅" if pred == true_label else "❌"
+    if pred == true_label:
         correct += 1
 
-    print(f"[{match}] Index: {i} | Predicted: {predicted} | True: {true_label}")
+    print(f"[{match}] Index: {i} | Predicted: {pred} | True: {true_label}")
 
 accuracy = sum([1 for t, p in zip(true_labels, predicted_labels) if t == p]) / len(true_labels)
 precision = precision_score(true_labels, predicted_labels, zero_division=0)
@@ -124,11 +140,44 @@ print(f"F1 Score: {f1:.2f}")
 print("Confusion Matrix:")
 print(cm)
 
+# Recall@5, Precision@5
+results_sorted = sorted(results, key=lambda x: x["prob"], reverse=True)
+top5 = results_sorted[:5]
+true_positives_in_top5 = sum(r["label"] for r in top5)
+total_vulnerable = sum(r["label"] for r in results)
+
+precision_at_5 = true_positives_in_top5 / 5
+recall_at_5 = true_positives_in_top5 / total_vulnerable if total_vulnerable > 0 else 0
+
+# Effort@20% LOC
+total_loc = sum(r["loc"] for r in results)
+effort_limit = total_loc * 0.2
+effort_loc = 0
+found_vulnerabilities = 0
+
+for r in results_sorted:
+    if effort_loc >= effort_limit:
+        break
+    effort_loc += r["loc"]
+    if r["label"] == 1:
+        found_vulnerabilities += 1
+
+effort_20 = found_vulnerabilities / total_vulnerable if total_vulnerable > 0 else 0
+
+print(f"\n--- Top-K Metrics ---")
+print(f"Precision@5: {precision_at_5:.2f}")
+print(f"Recall@5: {recall_at_5:.2f}")
+print(f"Effort@20% LOC: {effort_20:.2f}")
+
+# Log all metrics
 wandb.log({
     "eval/accuracy": accuracy,
     "eval/precision": precision,
     "eval/recall": recall,
     "eval/f1": f1,
+    "eval/precision@5": precision_at_5,
+    "eval/recall@5": recall_at_5,
+    "eval/effort@20_LOC": effort_20,
     "eval/confusion_matrix": wandb.plot.confusion_matrix(
         preds=predicted_labels,
         y_true=true_labels,
