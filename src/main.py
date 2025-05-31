@@ -1,73 +1,129 @@
 import torch
 import torch.nn as nn
 import random
+
 from transformers import RobertaTokenizer, RobertaModel
-from data import get_entries
+
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
+
+import optuna
 import wandb
+# wand dashboard
+# https://wandb.ai/comcatmangreen-university-klagenfurt-/vuldetection-optimization/groups/vuldetection-optim1/workspace
 
-all_data = get_entries()
+import data
 
-vulnerable_data = [i for i in all_data if i.vul == 1]
-invulnerable_data = [i for i in all_data if i.vul == 0]
-total = len(vulnerable_data) + len(invulnerable_data)
+# very clean code
+# https://github.com/nzw0301/optuna-wandb/blob/main/part-1/wandb_optuna.py
+# Possible hyperparameters to tune
+#   - layers
+#   - neurons
+#   - learning rate
+#   - optimizer
+#   - loss function
 
-epochs = 5
-sample_size = 100
-lr = 2e-5
-train_samples = vulnerable_data[:sample_size] + invulnerable_data[:sample_size]
-random.shuffle(train_samples)
 
-wandb.init(
-    project="clinescan",
-    config={
-        "model": "codebert-base",
-        "lr": lr,
-        "batch_size": 1,
-        "sample_size": sample_size * 2
-    }
-)
+# Global parameters external to model
+TOKENIZER = RobertaTokenizer.from_pretrained("microsoft/codebert-base")
+MODEL = RobertaModel.from_pretrained("microsoft/codebert-base")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-used_ids = set(id(f) for f in train_samples)
-eval_samples = [f for f in all_data if id(f) not in used_ids]
-eval_samples = random.sample(eval_samples, min(len(train_samples), len(eval_samples)))
+STUDY_NAME = "vuldetection-optim1"
+EPOCHS = 3
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def objective(trial):
+    # Hyperparameter selection
+    lr = trial.suggest_float("lr", 1e-6, 1e-3, log=True)
+    weight_decay = trial.suggest_float("weight_decay", 0.0, 1e-2)
+    optimizer_name = trial.suggest_categorical("optimizer", ["SGD", "Adam", "AdamW", "RMSprop"])
+    loss_function = trial.suggest_categorical("loss_function", ["L1Loss", "NLLLoss", "CrossEntropyLoss"])
 
-# Custom weights seem to favour 1 when provided with a lot of data
-# weight_for_0 = total / (2 * len(invulnerable_data))
-# weight_for_1 = total / (2 * len(vulnerable_data))
-# class_weights = torch.tensor([weight_for_0, weight_for_1]).to(device)
+    # Model initialization
+    classifier = nn.Sequential(
+        nn.Linear(768, 2)
+    ).to(DEVICE)
 
-tokenizer = RobertaTokenizer.from_pretrained("microsoft/codebert-base")
-model = RobertaModel.from_pretrained("microsoft/codebert-base")
-model.to(device)
-model.train()
 
-classifier = nn.Sequential(
-    nn.Linear(768, 256),
-    nn.ReLU(),
-    nn.Dropout(0.1),
-    nn.Linear(256, 2)
-).to(device)
+    # Optimizer initialization
+    # Python doesn't have switch case lol
+    if optimizer_name == "Adam":
+        optimizer = torch.optim.Adam(classifier.parameters(), lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == "AdamW":
+        optimizer = torch.optim.AdamW(classifier.parameters(), lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == "SGD":
+        optimizer = torch.optim.SGD(classifier.parameters(), lr=lr, weight_decay=weight_decay)
+    else:
+        optimizer = torch.optim.RMSprop(classifier.parameters(), lr=lr, weight_decay=weight_decay)
 
-# Use only with custom weights
-# loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-loss_fn = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(
-    list(model.parameters()) + list(classifier.parameters()), lr=lr
-)
+    if loss_function == "L1Loss":
+        loss_fn = nn.L1Loss()
+    elif loss_function == "MSELoss":
+        loss_fn = nn.MSELoss()
+    elif loss_function == "NLLLoss":
+        loss_fn = nn.NLLLoss()
+    else:
+        loss_fn = nn.CrossEntropyLoss()
 
-global_step = 0
-for epoch in range(epochs):
+    # loss_fn = nn.CrossEntropyLoss()
+    # optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-5)
+
+    # init tracking experiment.
+    # hyper-parameters, trial id are stored.
+    config = dict(trial.params)
+    config["trial.number"] = trial.number
+    wandb.init(
+        project="project",
+        config=config,
+        entity="user-organization",
+        group=STUDY_NAME,
+        reinit=True,
+    )
+    # Training of the model.
+    for epoch in range(EPOCHS):
+
+        # Training loop
+        classifier = modelTrain(classifier, loss_fn, optimizer)
+        accuracy = modelEval(classifier)
+
+        trial.report(accuracy, epoch)
+
+        # report validation accuracy to wandb
+        wandb.log(data={"validation accuracy": accuracy}, step=epoch)
+
+        # Handle pruning based on the intermediate value.
+        if trial.should_prune():
+            wandb.run.summary["state"] = "pruned"
+            wandb.finish(quiet=True)
+            raise optuna.exceptions.TrialPruned()
+
+
+
+    # Handle pruning based on the intermediate value.
+    #if trial.should_prune():
+    #        wandb.run.summary["state"] = "pruned"
+    #        wandb.finish(quiet=True)
+    #        raise optuna.exceptions.TrialPruned()
+
+    # report the final validation accuracy to wandb
+    wandb.run.summary["final accuracy"] = accuracy
+    wandb.run.summary["state"] = "completed"
+    wandb.finish(quiet=True)
+
+
+    return accuracy
+
+
+
+def modelTrain(classifier, loss_fn, optimizer):
     for i, item in enumerate(train_samples):
-        code = "\n".join(item.code)
-        label = torch.tensor([item.vul], dtype=torch.long).to(device)
+        code = item["code"]
+        label = torch.tensor([item["vul"]]).to(DEVICE)
 
-        tokens = tokenizer(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
-        tokens = {k: v.to(device) for k, v in tokens.items()}
+        tokens = TOKENIZER(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
+        tokens = {k: v.to(DEVICE) for k, v in tokens.items()}
 
-        outputs = model(**tokens)
+        with torch.no_grad():
+            outputs = MODEL(**tokens)
         cls_embedding = outputs.last_hidden_state[:, 0, :]
 
         logits = classifier(cls_embedding)
@@ -77,61 +133,61 @@ for epoch in range(epochs):
         optimizer.step()
         optimizer.zero_grad()
 
-        print(f"Sample {i} | Label: {item.vul} | Loss: {loss.item():.4f}")
-        wandb.log({"train/loss": loss.item(), "step": global_step})
-        global_step += 1
+        # print(f"Sample {i} | Label: {item['vul']} | Loss: {loss.item():.4f}")
 
-true_labels = []
-predicted_labels = []
-correct = 0
+    return classifier
 
-model.eval()
-classifier.eval()
+def modelEval(classifier):
+    correct = 0
 
-for i, item in enumerate(eval_samples):
-    code = "\n".join(item.code)
-    true_label = item.vul
 
-    tokens = tokenizer(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
-    tokens = {k: v.to(device) for k, v in tokens.items()}
+    for i in eval_indices:
+        code = all_data[i]["code"]
+        true_label = all_data[i]["vul"]
 
-    with torch.no_grad():
-        outputs = model(**tokens)
-        cls_embedding = outputs.last_hidden_state[:, 0, :]
-        logits = classifier(cls_embedding)
+        tokens = TOKENIZER(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
+        tokens = {k: v.to(DEVICE) for k, v in tokens.items()}
 
-    predicted = logits.argmax(dim=1).item()
-    predicted_labels.append(predicted)
-    true_labels.append(true_label)
+        with torch.no_grad():
+            outputs = MODEL(**tokens)
+            cls_embedding = outputs.last_hidden_state[:, 0, :]
+            logits = classifier(cls_embedding)
 
-    match = "✅" if predicted == true_label else "❌"
-    if predicted == true_label:
-        correct += 1
+        predicted = logits.argmax(dim=1).item()
 
-    print(f"[{match}] Index: {i} | Predicted: {predicted} | True: {true_label}")
+        match = "✅" if predicted == true_label else "❌"
+        if predicted == true_label:
+            correct += 1
 
-accuracy = sum([1 for t, p in zip(true_labels, predicted_labels) if t == p]) / len(true_labels)
-precision = precision_score(true_labels, predicted_labels, zero_division=0)
-recall = recall_score(true_labels, predicted_labels, zero_division=0)
-f1 = f1_score(true_labels, predicted_labels, zero_division=0)
-cm = confusion_matrix(true_labels, predicted_labels)
+        # print(f"[{match}] Index: {i} | Predicted: {predicted} | True: {true_label}")
 
-print("\n--- Evaluation Metrics ---")
-print(f"Accuracy: {accuracy:.2f}")
-print(f"Precision: {precision:.2f}")
-print(f"Recall: {recall:.2f}")
-print(f"F1 Score: {f1:.2f}")
-print("Confusion Matrix:")
-print(cm)
+    print(f"\nAccuracy: {correct}/{len(train_samples)} = {100 * correct / len(train_samples):.2f}%")
 
-wandb.log({
-    "eval/accuracy": accuracy,
-    "eval/precision": precision,
-    "eval/recall": recall,
-    "eval/f1": f1,
-    "eval/confusion_matrix": wandb.plot.confusion_matrix(
-        preds=predicted_labels,
-        y_true=true_labels,
-        class_names=["invulnerable", "vulnerable"]
-    )
-})
+    accuracy = 100 * correct / len(train_samples)
+    # report validation accuracy to wandb
+    # wandb.log(data={"validation accuracy": accuracy})
+
+    return accuracy
+
+# Data
+wandb.login(key='key')
+
+
+all_data, train_samples, used_indices, remaining_indices = data.get_entries(100)
+eval_indices = random.sample(remaining_indices, min(len(train_samples), len(remaining_indices)))
+
+MODEL.to(DEVICE)
+MODEL.eval()
+
+
+study = optuna.create_study(
+    direction="maximize",
+    study_name=STUDY_NAME,
+    pruner=optuna.pruners.MedianPruner(),
+)
+
+study.optimize(objective, n_trials=10)
+print(optuna.importance.get_param_importances(study))
+
+print("Best trial:")
+print(study.best_trial.params)
