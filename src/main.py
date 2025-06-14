@@ -25,19 +25,20 @@ all_data = get_entries()
 labels = [entry.vul for entry in all_data]
 
 SEED = 42
-EPOCHS = 1
-SAMPLE_SIZE = 0.0003
+EPOCHS = 3
+SAMPLE_SIZE = 0.003
 LEARNING_RATE = 1e-5
 BATCH_SIZE = 1
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_NAME = "microsoft/codebert-base"
+WANDB = True
 
 scaler = amp.GradScaler(DEVICE.type)
 set_seed(seed=SEED)
 
 logger = setup_logger(
     name="clinescan",
-    log_to_wandb=False,
+    log_to_wandb=WANDB,
     wandb_config={
         "project": "clinescan-eval",
         "name": f"{EPOCHS}x-{SAMPLE_SIZE*100}%",
@@ -156,8 +157,8 @@ for epoch in range(EPOCHS):
         scaler.update()
         torch.cuda.empty_cache()
 
-        logger.info(f"Epoch {epoch} Sample {i} | Loss: {loss.item():.4f}")
-        # wandb.log({"train/loss": loss.item(), "step": epoch * len(train_samples) + i})
+        logger.debug(f"Epoch {epoch} Sample {i} | Loss: {loss.item():.4f}")
+        logger.metric("loss", loss.item(), "train", epoch * len(train_samples) + i)
 
 model.eval()
 classifier.eval()
@@ -249,17 +250,11 @@ if recall_at_5:
     recall5 = sum(recall_at_5) / len(recall_at_5)
     precision5 = sum(precision_at_5) / len(precision_at_5)
     effort20 = sum(effort_20) / len(effort_20)
-
+    
     logger.info("\n=== Line-Level Metrics ===")
-    logger.info(f"Recall@5        : {recall5:.4f}")
-    logger.info(f"Precision@5     : {precision5:.4f}")
-    logger.info(f"Effort@20% LOC  : {effort20:.4f}")
-
-    # wandb.log({
-    # "line_level/recall@5": recall5,
-    # "line_level/precision@5": precision5,
-    # "line_level/effort@20%_LOC": effort20
-    # })
+    logger.metric("recall@5", recall5, "line_level")
+    logger.metric("precision@5", precision5, "line_level")
+    logger.metric("effort@20%_LOC", effort20, "line_level")
 
 accuracy = sum(t == p for t, p in zip(true_labels, predicted_labels)) / len(true_labels)
 precision = precision_score(true_labels, predicted_labels, zero_division=0)
@@ -268,21 +263,19 @@ f1 = f1_score(true_labels, predicted_labels, zero_division=0)
 cm = confusion_matrix(true_labels, predicted_labels)
 
 logger.info("\n--- Evaluation Metrics ---")
-logger.info(f"Accuracy: {accuracy:.2f}")
-logger.info(f"Precision: {precision:.2f}")
-logger.info(f"Recall: {recall:.2f}")
-logger.info(f"F1 Score: {f1:.2f}")
+logger.metric("accuracy", accuracy, "eval")
+logger.metric("precision", precision, "eval")
+logger.metric("recall", recall, "eval")
+logger.metric("f1", f1, "eval")
+logger.metric("accuracy", accuracy, "eval")
+
 logger.info("Confusion Matrix:")
 logger.info(cm)
 
-# wandb.log({
-#     "eval/accuracy": accuracy,
-#     "eval/precision": precision,
-#     "eval/recall": recall,
-#     "eval/f1": f1,
-#     "eval/confusion_matrix": wandb.plot.confusion_matrix(
-#         preds=predicted_labels,
-#         y_true=true_labels,
-#         class_names=["invulnerable", "vulnerable"]
-#     )
-# })
+wandb.log({
+    "eval/confusion_matrix": wandb.plot.confusion_matrix(
+        preds=predicted_labels,
+        y_true=true_labels,
+        class_names=["invulnerable", "vulnerable"]
+    )
+})
