@@ -10,6 +10,8 @@ from torch import amp
 from tqdm import tqdm
 import random
 from sklearn.model_selection import train_test_split
+from collections import Counter
+import numpy as np
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -21,8 +23,8 @@ scaler = amp.GradScaler('cuda')
 all_data = get_entries()
 labels = [entry.vul for entry in all_data]
 
-epochs = 1
-sample_size = 0.1
+epochs = 3
+sample_size = 0.03
 lr = 1e-5
 seed = 42
 batch_size = 1
@@ -40,33 +42,46 @@ wandb.init(
     }
 )
 
+vulnerable = [s for s in all_data if s.vul == 1]
+non_vulnerable = [s for s in all_data if s.vul == 0]
+
 train_samples, eval_samples = train_test_split(
     all_data,
     test_size = sample_size * 0.2,
-    train_size = sample_size * 0.8,
     random_state = seed,
     shuffle = True,
     stratify = labels
 )
 
-print(f"Train samples: {len(train_samples)}")
+vul_train = [x for x in train_samples if x.vul == 1]
+nonvul_train = [x for x in train_samples if x.vul == 0]
+
+balanced_train_size = int(len(all_data) * sample_size * 0.8)
+
+half_size = balanced_train_size // 2
+
+vul_train_balanced = random.sample(vul_train, min(len(vul_train), half_size))
+nonvul_train_balanced = random.sample(nonvul_train, min(len(nonvul_train), half_size))
+
+balanced_train_samples = vul_train_balanced + nonvul_train_balanced
+random.shuffle(balanced_train_samples)
+
+print(f"Train samples: {len(balanced_train_samples)}")
 print(f"Eval samples: {len(eval_samples)}")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 tokenizer = RobertaTokenizerFast.from_pretrained("microsoft/codebert-base")
 
-model = RobertaModel.from_pretrained("microsoft/codebert-base").to(device)
+model = RobertaModel.from_pretrained("microsoft/codebert-base", attn_implementation="eager").to(device)
 model.train()
 
 classifier = nn.Sequential(
     nn.Linear(768, 256),
     nn.ReLU(),
     nn.Dropout(0.1),
-    nn.Linear(256, 2)
+    nn.Linear(256, 1)
 ).to(device)
-
-# loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
 
 def get_smoothing_loss_fn(epoch):
     smoothing = max(0.05, 0.1 * (0.9 ** epoch))
@@ -78,9 +93,9 @@ optimizer = torch.optim.Adam(
 
 for epoch in range(epochs):
     loss_fn = get_smoothing_loss_fn(epoch)
-    for i, item in enumerate(train_samples):
+    for i, item in enumerate(balanced_train_samples):
         code = "\n".join(item.code)
-        label = torch.tensor([item.vul], dtype=torch.long).to(device)
+        label = torch.tensor([item.vul], dtype=torch.float32).to(device) 
 
         tokens = tokenizer(
             code, padding=True, truncation=True, max_length=512,
@@ -94,11 +109,11 @@ for epoch in range(epochs):
         with amp.autocast(device_type='cuda'):
             outputs = model(**tokens, output_attentions=True)
             cls_embedding = outputs.last_hidden_state[:, 0, :]
-            logits = classifier(cls_embedding)
-            loss = loss_fn(logits, label)
+            logits = classifier(cls_embedding).view(-1)
+            loss = F.binary_cross_entropy_with_logits(logits, label)
 
         if label.item() == 1 and item.flaw_line_no:
-            attn = torch.stack(outputs.attentions[4:8])[:, 0, :, 0, :]
+            attn = torch.stack(outputs.attentions[4:8])[:, 0, :, 0, :]  # [layers, heads, seq_len]
             mean_attn = attn.mean(dim=(0, 1))  # [seq_len]
 
             lines = code.splitlines()
@@ -111,19 +126,22 @@ for epoch in range(epochs):
                     current_line += 1
                 token_to_line[i_tok] = current_line
 
+            valid_indices = [i for i in range(len(mean_attn)) if token_to_line.get(i, -1) >= 0]
+            mean_attn = mean_attn[valid_indices]
             match_mask = torch.tensor([
-                1.0 if token_to_line.get(i, -2) + 1 in item.flaw_line_no else 0.0
-                for i in range(len(mean_attn))
+                1.0 if token_to_line[i] + 1 in item.flaw_line_no else 0.0
+                for i in valid_indices
             ], device=mean_attn.device)
 
-            # Clamp attention to avoid log(0) in loss
             mean_attn = torch.clamp(mean_attn, min=1e-6, max=1-1e-6)
-            # Binary cross-entropy between attention and line labels
-            attention_loss = F.binary_cross_entropy(mean_attn, match_mask)
-            # Add to main classification loss
-            loss = loss + 0.2 * attention_loss
-        else:
-            loss = loss * 1.2
+            attn_probs = F.softmax(mean_attn, dim=0)
+
+            if match_mask.sum() > 0:
+                match_mask = match_mask / match_mask.sum()
+                attention_loss = F.kl_div(attn_probs.log(), match_mask, reduction="batchmean")
+                loss = loss + 0.2 * attention_loss
+            else:
+                loss = loss * 1.2
 
 
         scaler.scale(loss).backward()
@@ -160,8 +178,10 @@ with torch.no_grad():
         tokens = {k: v.to(device) for k, v in tokens.items()}
 
         outputs = model(**tokens, output_attentions=True)
-        attn = torch.stack(outputs.attentions[4:8])[:, 0, :, 0, :]
-        mean_attn = attn.mean(dim=(0, 1))
+        attn_layers = outputs.attentions[4:8]
+        # weights = torch.tensor([0.1, 0.2, 0.3, 0.4], device=device).view(-1, 1, 1, 1, 1)
+        # attn = torch.stack(attn_layers)[:, 0, :, 0, :]  # shape: [4, heads, seq_len]
+        # mean_attn = (attn * weights).sum(dim=0).mean(dim=0)  # weighted avg, then mean over heads
 
         lines = code.splitlines()
         token_to_line = {}
@@ -174,11 +194,16 @@ with torch.no_grad():
             token_to_line[i_tok] = current_line
 
         line_scores = {}
+
+        weights = torch.tensor([0.1, 0.2, 0.3, 0.4], device=device).view(-1, 1, 1)  # [4,1,1]
+        attn = torch.stack(attn_layers)[:, 0, :, 0, :]  # [4, heads, seq_len]
+        weighted_attn = attn * weights  # broadcasts properly
+        mean_attn = weighted_attn.sum(dim=0).mean(dim=0)  # [seq_len]
+
         for idx, score in enumerate(mean_attn):
             line = token_to_line.get(idx, None)
             if line is not None:
-                weight = (line + 1) / len(lines)
-                line_scores[line] = line_scores.get(line, 0.0) + weight * score.item()
+                line_scores[line] = line_scores.get(line, 0.0) + score.item()
 
         if line_scores:
             scores = torch.tensor(list(line_scores.values()))
@@ -208,8 +233,8 @@ with torch.no_grad():
         tokens = {k: v.to(device) for k, v in tokens.items()}
         outputs = model(**tokens)
         cls_embedding = outputs.last_hidden_state[:, 0, :]
-        logits = classifier(cls_embedding)
-        pred = logits.argmax(dim=1).item()
+        logits = classifier(cls_embedding).squeeze()
+        pred = (logits > 0).long().item()
 
         true_labels.append(label)
         predicted_labels.append(pred)
