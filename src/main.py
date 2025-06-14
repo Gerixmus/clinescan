@@ -18,27 +18,29 @@ def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-scaler = amp.GradScaler('cuda')
 
 all_data = get_entries()
 labels = [entry.vul for entry in all_data]
 
-epochs = 3
-sample_size = 0.03
-lr = 1e-5
-seed = 42
-batch_size = 1
+SEED = 42
+EPOCHS = 3
+SAMPLE_SIZE = 0.03
+LEARNING_RATE = 1e-5
+BATCH_SIZE = 1
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MODEL_NAME = "microsoft/codebert-base"
 
-set_seed(seed)
+scaler = amp.GradScaler(DEVICE.type)
+set_seed(seed=SEED)
 
 wandb.init(
     project="clinescan-eval",
-    name=f"{epochs}x-{sample_size*100}%",
+    name=f"{EPOCHS}x-{SAMPLE_SIZE*100}%",
     config={
-        "model": "codebert-base",
-        "lr": lr,
-        "batch_size": batch_size,
-        "sample_size": sample_size
+        "model": MODEL_NAME,
+        "lr": LEARNING_RATE,
+        "batch_size": BATCH_SIZE,
+        "sample_size": SAMPLE_SIZE
     }
 )
 
@@ -47,8 +49,8 @@ non_vulnerable = [s for s in all_data if s.vul == 0]
 
 train_samples, eval_samples = train_test_split(
     all_data,
-    test_size = sample_size * 0.2,
-    random_state = seed,
+    test_size = SAMPLE_SIZE * 0.2,
+    random_state = SEED,
     shuffle = True,
     stratify = labels
 )
@@ -56,7 +58,7 @@ train_samples, eval_samples = train_test_split(
 vul_train = [x for x in train_samples if x.vul == 1]
 nonvul_train = [x for x in train_samples if x.vul == 0]
 
-balanced_train_size = int(len(all_data) * sample_size * 0.8)
+balanced_train_size = int(len(all_data) * SAMPLE_SIZE * 0.8)
 
 half_size = balanced_train_size // 2
 
@@ -69,11 +71,9 @@ random.shuffle(balanced_train_samples)
 print(f"Train samples: {len(balanced_train_samples)}")
 print(f"Eval samples: {len(eval_samples)}")
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-tokenizer = RobertaTokenizerFast.from_pretrained("microsoft/codebert-base")
-
-model = RobertaModel.from_pretrained("microsoft/codebert-base", attn_implementation="eager").to(device)
+tokenizer = RobertaTokenizerFast.from_pretrained(MODEL_NAME)
+model = RobertaModel.from_pretrained(MODEL_NAME, attn_implementation="eager").to(DEVICE)
 model.train()
 
 classifier = nn.Sequential(
@@ -81,28 +81,28 @@ classifier = nn.Sequential(
     nn.ReLU(),
     nn.Dropout(0.1),
     nn.Linear(256, 1)
-).to(device)
+).to(DEVICE)
 
 def get_smoothing_loss_fn(epoch):
     smoothing = max(0.05, 0.1 * (0.9 ** epoch))
     return nn.CrossEntropyLoss(label_smoothing=smoothing)
 
 optimizer = torch.optim.Adam(
-    list(model.parameters()) + list(classifier.parameters()), lr=lr
+    list(model.parameters()) + list(classifier.parameters()), lr=LEARNING_RATE
 )
 
-for epoch in range(epochs):
+for epoch in range(EPOCHS):
     loss_fn = get_smoothing_loss_fn(epoch)
     for i, item in enumerate(balanced_train_samples):
         code = "\n".join(item.code)
-        label = torch.tensor([item.vul], dtype=torch.float32).to(device) 
+        label = torch.tensor([item.vul], dtype=torch.float32).to(DEVICE) 
 
         tokens = tokenizer(
             code, padding=True, truncation=True, max_length=512,
             return_tensors="pt", return_offsets_mapping=True
         )
         offset_mapping = tokens.pop("offset_mapping")[0].tolist()
-        tokens = {k: v.to(device) for k, v in tokens.items()}
+        tokens = {k: v.to(DEVICE) for k, v in tokens.items()}
 
         optimizer.zero_grad()
 
@@ -175,7 +175,7 @@ with torch.no_grad():
             return_tensors="pt"
         )
         offset_mapping = tokens.pop("offset_mapping")[0].tolist()
-        tokens = {k: v.to(device) for k, v in tokens.items()}
+        tokens = {k: v.to(DEVICE) for k, v in tokens.items()}
 
         outputs = model(**tokens, output_attentions=True)
         attn_layers = outputs.attentions[4:8]
@@ -195,7 +195,7 @@ with torch.no_grad():
 
         line_scores = {}
 
-        weights = torch.tensor([0.1, 0.2, 0.3, 0.4], device=device).view(-1, 1, 1)  # [4,1,1]
+        weights = torch.tensor([0.1, 0.2, 0.3, 0.4], device=DEVICE).view(-1, 1, 1)  # [4,1,1]
         attn = torch.stack(attn_layers)[:, 0, :, 0, :]  # [4, heads, seq_len]
         weighted_attn = attn * weights  # broadcasts properly
         mean_attn = weighted_attn.sum(dim=0).mean(dim=0)  # [seq_len]
@@ -230,7 +230,7 @@ with torch.no_grad():
         code = "\n".join(item.code)
         label = item.vul
         tokens = tokenizer(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
-        tokens = {k: v.to(device) for k, v in tokens.items()}
+        tokens = {k: v.to(DEVICE) for k, v in tokens.items()}
         outputs = model(**tokens)
         cls_embedding = outputs.last_hidden_state[:, 0, :]
         logits = classifier(cls_embedding).squeeze()
