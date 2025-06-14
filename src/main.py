@@ -12,10 +12,8 @@ import random
 from sklearn.model_selection import train_test_split
 from collections import Counter
 import numpy as np
+from logger import setup_logger
 import logging
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -27,8 +25,8 @@ all_data = get_entries()
 labels = [entry.vul for entry in all_data]
 
 SEED = 42
-EPOCHS = 3
-SAMPLE_SIZE = 0.03
+EPOCHS = 1
+SAMPLE_SIZE = 0.0003
 LEARNING_RATE = 1e-5
 BATCH_SIZE = 1
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -37,14 +35,18 @@ MODEL_NAME = "microsoft/codebert-base"
 scaler = amp.GradScaler(DEVICE.type)
 set_seed(seed=SEED)
 
-wandb.init(
-    project="clinescan-eval",
-    name=f"{EPOCHS}x-{SAMPLE_SIZE*100}%",
-    config={
-        "model": MODEL_NAME,
-        "lr": LEARNING_RATE,
-        "batch_size": BATCH_SIZE,
-        "sample_size": SAMPLE_SIZE
+logger = setup_logger(
+    name="clinescan",
+    log_to_wandb=False,
+    wandb_config={
+        "project": "clinescan-eval",
+        "name": f"{EPOCHS}x-{SAMPLE_SIZE*100}%",
+        "config": {
+            "model": MODEL_NAME,
+            "lr": LEARNING_RATE,
+            "batch_size": BATCH_SIZE,
+            "sample_size": SAMPLE_SIZE
+        }
     }
 )
 
@@ -155,7 +157,7 @@ for epoch in range(EPOCHS):
         torch.cuda.empty_cache()
 
         logger.info(f"Epoch {epoch} Sample {i} | Loss: {loss.item():.4f}")
-        wandb.log({"train/loss": loss.item(), "step": epoch * len(train_samples) + i})
+        # wandb.log({"train/loss": loss.item(), "step": epoch * len(train_samples) + i})
 
 model.eval()
 classifier.eval()
@@ -253,11 +255,11 @@ if recall_at_5:
     logger.info(f"Precision@5     : {precision5:.4f}")
     logger.info(f"Effort@20% LOC  : {effort20:.4f}")
 
-    wandb.log({
-    "line_level/recall@5": recall5,
-    "line_level/precision@5": precision5,
-    "line_level/effort@20%_LOC": effort20
-    })
+    # wandb.log({
+    # "line_level/recall@5": recall5,
+    # "line_level/precision@5": precision5,
+    # "line_level/effort@20%_LOC": effort20
+    # })
 
 accuracy = sum(t == p for t, p in zip(true_labels, predicted_labels)) / len(true_labels)
 precision = precision_score(true_labels, predicted_labels, zero_division=0)
@@ -273,14 +275,14 @@ logger.info(f"F1 Score: {f1:.2f}")
 logger.info("Confusion Matrix:")
 logger.info(cm)
 
-wandb.log({
-    "eval/accuracy": accuracy,
-    "eval/precision": precision,
-    "eval/recall": recall,
-    "eval/f1": f1,
-    "eval/confusion_matrix": wandb.plot.confusion_matrix(
-        preds=predicted_labels,
-        y_true=true_labels,
-        class_names=["invulnerable", "vulnerable"]
-    )
-})
+# wandb.log({
+#     "eval/accuracy": accuracy,
+#     "eval/precision": precision,
+#     "eval/recall": recall,
+#     "eval/f1": f1,
+#     "eval/confusion_matrix": wandb.plot.confusion_matrix(
+#         preds=predicted_labels,
+#         y_true=true_labels,
+#         class_names=["invulnerable", "vulnerable"]
+#     )
+# })
