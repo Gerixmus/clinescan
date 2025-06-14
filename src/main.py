@@ -12,6 +12,10 @@ import random
 from sklearn.model_selection import train_test_split
 from collections import Counter
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -68,9 +72,8 @@ nonvul_train_balanced = random.sample(nonvul_train, min(len(nonvul_train), half_
 balanced_train_samples = vul_train_balanced + nonvul_train_balanced
 random.shuffle(balanced_train_samples)
 
-print(f"Train samples: {len(balanced_train_samples)}")
-print(f"Eval samples: {len(eval_samples)}")
-
+logger.info(f"Train samples: {len(balanced_train_samples)}")
+logger.info(f"Eval samples: {len(eval_samples)}")
 
 tokenizer = RobertaTokenizerFast.from_pretrained(MODEL_NAME)
 model = RobertaModel.from_pretrained(MODEL_NAME, attn_implementation="eager").to(DEVICE)
@@ -151,7 +154,7 @@ for epoch in range(EPOCHS):
         scaler.update()
         torch.cuda.empty_cache()
 
-        print(f"Epoch {epoch} Sample {i} | Loss: {loss.item():.4f}")
+        logger.info(f"Epoch {epoch} Sample {i} | Loss: {loss.item():.4f}")
         wandb.log({"train/loss": loss.item(), "step": epoch * len(train_samples) + i})
 
 model.eval()
@@ -245,10 +248,10 @@ if recall_at_5:
     precision5 = sum(precision_at_5) / len(precision_at_5)
     effort20 = sum(effort_20) / len(effort_20)
 
-    print("\n=== Line-Level Metrics ===")
-    print(f"Recall@5        : {recall5:.4f}")
-    print(f"Precision@5     : {precision5:.4f}")
-    print(f"Effort@20% LOC  : {effort20:.4f}")
+    logger.info("\n=== Line-Level Metrics ===")
+    logger.info(f"Recall@5        : {recall5:.4f}")
+    logger.info(f"Precision@5     : {precision5:.4f}")
+    logger.info(f"Effort@20% LOC  : {effort20:.4f}")
 
     wandb.log({
     "line_level/recall@5": recall5,
@@ -262,13 +265,13 @@ recall = recall_score(true_labels, predicted_labels, zero_division=0)
 f1 = f1_score(true_labels, predicted_labels, zero_division=0)
 cm = confusion_matrix(true_labels, predicted_labels)
 
-print("\n--- Evaluation Metrics ---")
-print(f"Accuracy: {accuracy:.2f}")
-print(f"Precision: {precision:.2f}")
-print(f"Recall: {recall:.2f}")
-print(f"F1 Score: {f1:.2f}")
-print("Confusion Matrix:")
-print(cm)
+logger.info("\n--- Evaluation Metrics ---")
+logger.info(f"Accuracy: {accuracy:.2f}")
+logger.info(f"Precision: {precision:.2f}")
+logger.info(f"Recall: {recall:.2f}")
+logger.info(f"F1 Score: {f1:.2f}")
+logger.info("Confusion Matrix:")
+logger.info(cm)
 
 wandb.log({
     "eval/accuracy": accuracy,
