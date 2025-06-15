@@ -2,38 +2,32 @@ import torch
 import torch.nn as nn
 import random
 from transformers import RobertaModel, RobertaTokenizerFast
-from data import get_entries
+from data import get_train_test_split
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 import wandb
 import torch.nn.functional as F
 from torch import amp
 from tqdm import tqdm
 import random
-from sklearn.model_selection import train_test_split
-from collections import Counter
-import numpy as np
 from logger import setup_logger
-import logging
 
 def set_seed(seed=42):
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-
-all_data = get_entries()
-labels = [entry.vul for entry in all_data]
-
 SEED = 42
 EPOCHS = 3
-SAMPLE_SIZE = 0.003
+SAMPLE_SIZE = 0.05
 LEARNING_RATE = 1e-5
 BATCH_SIZE = 1
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_NAME = "microsoft/codebert-base"
-WANDB = True
+WANDB = False
 
-scaler = amp.GradScaler(DEVICE.type)
+tokenizer = RobertaTokenizerFast.from_pretrained(MODEL_NAME)
+model = RobertaModel.from_pretrained(MODEL_NAME, attn_implementation="eager").to(DEVICE)
+
 set_seed(seed=SEED)
 
 logger = setup_logger(
@@ -51,35 +45,8 @@ logger = setup_logger(
     }
 )
 
-vulnerable = [s for s in all_data if s.vul == 1]
-non_vulnerable = [s for s in all_data if s.vul == 0]
+train_samples, eval_samples = get_train_test_split(SAMPLE_SIZE, SEED, logger)
 
-train_samples, eval_samples = train_test_split(
-    all_data,
-    test_size = SAMPLE_SIZE * 0.2,
-    random_state = SEED,
-    shuffle = True,
-    stratify = labels
-)
-
-vul_train = [x for x in train_samples if x.vul == 1]
-nonvul_train = [x for x in train_samples if x.vul == 0]
-
-balanced_train_size = int(len(all_data) * SAMPLE_SIZE * 0.8)
-
-half_size = balanced_train_size // 2
-
-vul_train_balanced = random.sample(vul_train, min(len(vul_train), half_size))
-nonvul_train_balanced = random.sample(nonvul_train, min(len(nonvul_train), half_size))
-
-balanced_train_samples = vul_train_balanced + nonvul_train_balanced
-random.shuffle(balanced_train_samples)
-
-logger.info(f"Train samples: {len(balanced_train_samples)}")
-logger.info(f"Eval samples: {len(eval_samples)}")
-
-tokenizer = RobertaTokenizerFast.from_pretrained(MODEL_NAME)
-model = RobertaModel.from_pretrained(MODEL_NAME, attn_implementation="eager").to(DEVICE)
 model.train()
 
 classifier = nn.Sequential(
@@ -89,17 +56,14 @@ classifier = nn.Sequential(
     nn.Linear(256, 1)
 ).to(DEVICE)
 
-def get_smoothing_loss_fn(epoch):
-    smoothing = max(0.05, 0.1 * (0.9 ** epoch))
-    return nn.CrossEntropyLoss(label_smoothing=smoothing)
-
 optimizer = torch.optim.Adam(
     list(model.parameters()) + list(classifier.parameters()), lr=LEARNING_RATE
 )
 
+scaler = amp.GradScaler(DEVICE.type)
+
 for epoch in range(EPOCHS):
-    loss_fn = get_smoothing_loss_fn(epoch)
-    for i, item in enumerate(balanced_train_samples):
+    for i, item in enumerate(train_samples):
         code = "\n".join(item.code)
         label = torch.tensor([item.vul], dtype=torch.float32).to(DEVICE) 
 
@@ -185,9 +149,6 @@ with torch.no_grad():
 
         outputs = model(**tokens, output_attentions=True)
         attn_layers = outputs.attentions[4:8]
-        # weights = torch.tensor([0.1, 0.2, 0.3, 0.4], device=device).view(-1, 1, 1, 1, 1)
-        # attn = torch.stack(attn_layers)[:, 0, :, 0, :]  # shape: [4, heads, seq_len]
-        # mean_attn = (attn * weights).sum(dim=0).mean(dim=0)  # weighted avg, then mean over heads
 
         lines = code.splitlines()
         token_to_line = {}
@@ -272,10 +233,11 @@ logger.metric("accuracy", accuracy, "eval")
 logger.info("Confusion Matrix:")
 logger.info(cm)
 
-wandb.log({
-    "eval/confusion_matrix": wandb.plot.confusion_matrix(
-        preds=predicted_labels,
-        y_true=true_labels,
-        class_names=["invulnerable", "vulnerable"]
-    )
-})
+if(WANDB):
+    wandb.log({
+        "eval/confusion_matrix": wandb.plot.confusion_matrix(
+            preds=predicted_labels,
+            y_true=true_labels,
+            class_names=["invulnerable", "vulnerable"]
+        )
+    })

@@ -20,11 +20,11 @@ class WandbLogger(logging.Logger):
 def setup_logger(name="clinescan", log_to_wandb=False, wandb_config=None):
     logging.setLoggerClass(WandbLogger)
     logger: WandbLogger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
 
     if not logger.handlers:
         handler = logging.StreamHandler()
-        handler.setLevel(logging.INFO)
+        handler.setLevel(logging.DEBUG)
         formatter = logging.Formatter("%(message)s")
         handler.setFormatter(formatter)
         logger.addHandler(handler)
