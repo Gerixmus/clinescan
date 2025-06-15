@@ -3,33 +3,33 @@ from torch import amp
 import torch.nn.functional as F
 from function import Function
 from logger import WandbLogger
+from config import Config
 
 def train(
         model: torch.nn.Module,
         train_samples: list[Function],
-        epochs: int, 
-        device: torch.device, 
+        config: Config,
         tokenizer, 
-        optimizer, 
         classifier: torch.nn.Module,
+        optimizer, 
         logger: WandbLogger
     ) -> None:
 
     model.train()
     classifier.train()
-    scaler = amp.GradScaler(device.type)
+    scaler = amp.GradScaler(config.device.type)
 
-    for epoch in range(epochs):
+    for epoch in range(config.epochs):
         for i, item in enumerate(train_samples):
             code = "\n".join(item.code)
-            label = torch.tensor([item.vul], dtype=torch.float32).to(device) 
+            label = torch.tensor([item.vul], dtype=torch.float32).to(config.device) 
 
             tokens = tokenizer(
                 code, padding=True, truncation=True, max_length=512,
                 return_tensors="pt", return_offsets_mapping=True
             )
             offset_mapping = tokens.pop("offset_mapping")[0].tolist()
-            tokens = {k: v.to(device) for k, v in tokens.items()}
+            tokens = {k: v.to(config.device) for k, v in tokens.items()}
 
             optimizer.zero_grad()
 

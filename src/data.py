@@ -2,6 +2,7 @@ import json
 from function import Function
 from sklearn.model_selection import train_test_split
 import random
+from config import Config
 
 def get_entries() -> list[Function]:
     with open("data.json", "r") as f:
@@ -19,14 +20,14 @@ def get_entries() -> list[Function]:
         data.append(func)
     return data
 
-def get_train_test_split(sample_size, seed, logger):
+def get_train_test_split(config: Config, logger):
     all_data = get_entries()
     labels = [entry.vul for entry in all_data]
 
     all_train_samples, eval_samples = train_test_split(
         all_data,
-        test_size = sample_size * 0.2,
-        random_state = seed,
+        test_size = config.sample_size * 0.2,
+        random_state = config.seed,
         shuffle = True,
         stratify = labels
     )
@@ -34,7 +35,7 @@ def get_train_test_split(sample_size, seed, logger):
     vul_train = [x for x in all_train_samples if x.vul == 1]
     nonvul_train = [x for x in all_train_samples if x.vul == 0]
 
-    balanced_train_size = int(len(all_data) * sample_size * 0.8)
+    balanced_train_size = int(len(all_data) * config.sample_size * 0.8)
 
     half_size = balanced_train_size // 2
 

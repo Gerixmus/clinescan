@@ -4,9 +4,19 @@ import wandb
 from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score
 from tqdm import tqdm
 from function import Function
+from config import Config
+from logger import WandbLogger
 
 
-def evaluate(model, eval_samples: list[Function], device: torch.device, wandb_enabled: bool, tokenizer, logger, classifier):
+def evaluate(
+        model, 
+        eval_samples: list[Function],
+        config: Config,
+        tokenizer, 
+        classifier,
+        logger: WandbLogger
+    ):
+
     model.eval()
     classifier.eval()
     
@@ -28,7 +38,7 @@ def evaluate(model, eval_samples: list[Function], device: torch.device, wandb_en
             return_tensors="pt"
         )
             offset_mapping = tokens.pop("offset_mapping")[0].tolist()
-            tokens = {k: v.to(device) for k, v in tokens.items()}
+            tokens = {k: v.to(config.device) for k, v in tokens.items()}
 
             outputs = model(**tokens, output_attentions=True)
             attn_layers = outputs.attentions[4:8]
@@ -45,7 +55,7 @@ def evaluate(model, eval_samples: list[Function], device: torch.device, wandb_en
 
             line_scores = {}
 
-            weights = torch.tensor([0.1, 0.2, 0.3, 0.4], device=device).view(-1, 1, 1)  # [4,1,1]
+            weights = torch.tensor([0.1, 0.2, 0.3, 0.4], device=config.device).view(-1, 1, 1)  # [4,1,1]
             attn = torch.stack(attn_layers)[:, 0, :, 0, :]  # [4, heads, seq_len]
             weighted_attn = attn * weights  # broadcasts properly
             mean_attn = weighted_attn.sum(dim=0).mean(dim=0)  # [seq_len]
@@ -80,7 +90,7 @@ def evaluate(model, eval_samples: list[Function], device: torch.device, wandb_en
             code = "\n".join(item.code)
             label = item.vul
             tokens = tokenizer(code, padding=True, truncation=True, max_length=512, return_tensors="pt")
-            tokens = {k: v.to(device) for k, v in tokens.items()}
+            tokens = {k: v.to(config.device) for k, v in tokens.items()}
             outputs = model(**tokens)
             cls_embedding = outputs.last_hidden_state[:, 0, :]
             logits = classifier(cls_embedding).squeeze()
@@ -116,7 +126,7 @@ def evaluate(model, eval_samples: list[Function], device: torch.device, wandb_en
     logger.info("Confusion Matrix:")
     logger.info(cm)
 
-    if(wandb_enabled):
+    if(config.wandb):
         wandb.log({
         "eval/confusion_matrix": wandb.plot.confusion_matrix(
             preds=predicted_labels,
