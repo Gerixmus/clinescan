@@ -12,10 +12,7 @@ class WandbLogger(logging.Logger):
     def metric(self, name: str, value, level: str, step: int = None):
         self.info(f"{name}: {value:.4f}")
         if self.wandb_run:
-            log_dict = {f"{level}/{name}": value}
-            if step is not None:
-                log_dict["step"] = step
-            self.wandb_run.log(log_dict)
+            self.wandb_run.log({f"{level}/{name}": value}, step=step)
 
 def setup_logger(name, config: Config):
     logging.setLoggerClass(WandbLogger)
@@ -32,7 +29,7 @@ def setup_logger(name, config: Config):
     if config.wandb:
         import wandb
         wandb_run = wandb.init(
-            project = "clinescan-eval",
+            project = "last-milestone",
             name = f"{config.epochs}x-{config.sample_size*100}%",
             config = {
                 "model": config.model_name,
