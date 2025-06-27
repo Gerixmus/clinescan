@@ -45,9 +45,9 @@ def objective_factory(config, train_samples, eval_samples, tokenizer, logger):
         #     loss_fn = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([0.95], device=config.device))
 
         train(model, train_samples, config, tokenizer, classifier, optimizer, logger)
-        accuracy = evaluate(model, eval_samples, config, tokenizer, classifier, logger)
+        f1 = evaluate(model, eval_samples, config, tokenizer, classifier, logger)
 
-        return accuracy
+        return f1
 
     return objective
 
